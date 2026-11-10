@@ -1,13 +1,6 @@
-"""Development baseline: chunk compression + file write/flush/fsync.
-
-Run from the repository root:
-    python benchmarks/collect_measurements.py README.md
-
-The CSV intentionally omits Linux CPU features; it is NOT yet selector input.
-Input reads, entropy sampling, decompression checks and cleanup are untimed.
-Each trial creates a separate file. fsync is included, but directory syncing
-and platform-specific power-loss guarantees are outside this prototype.
-"""
+# Comparing the compression methods and recording the Linux CPU quota stats
+# Run this from the repo root: python benchmarks/collect_measurements.py README.md
+# The CPU limits are set externally using systemd-run. Output is for benchmark testing not ML yet.
 
 import argparse
 from collections import Counter
@@ -24,55 +17,234 @@ import time
 import lz4.frame
 import zstandard
 
+# Keeping the uncompressed case for us to have a baseline for size and write time
 CODECS = ("none", "lz4", "zstd")
-FIELDS = (
-    "workload_id", "decision_id", "repeat", "chunk_index", "trial_order",
-    "codec", "chunk_bytes", "sample_entropy", "stored_bytes",
-    "compression_us", "write_sync_us", "write_latency_us", "cpu_time_us",
-    "storage_savings_fraction", "throughput_mib_s", "verified",
+
+# Counters from cpu.stat
+STAT_KEYS = (
+    "usage_usec",
+    "user_usec",
+    "system_usec",
+    "nr_periods",
+    "nr_throttled",
+    "throttled_usec",
 )
 
+#Adding the CPU measurements to the end of each of the trial rows
+CG_FIELDS = (
+    "cgroup_available",
+    "quota_us",
+    "period_us",
+    "quota_fraction",
+    "cgroup_observation_us",
+    *("cgroup_" + key for key in STAT_KEYS),
+)
+
+FIELDS = (
+    "workload_id",
+    "decision_id",
+    "repeat",
+    "chunk_index",
+    "trial_order",
+    "codec",
+    "chunk_bytes",
+    "sample_entropy",
+    "stored_bytes",
+    "compression_us",
+    "write_sync_us",
+    "write_latency_us",
+    "cpu_time_us",
+    "storage_savings_fraction",
+    "throughput_mib_s",
+    "verified",
+    *CG_FIELDS,
+)
+
+# A zero chunk size would look like end of file, so zero repeats means no trials
 def positive_int(text):
     value = int(text)
     if value <= 0:
         raise argparse.ArgumentTypeError("Must be a positive integer.")
     return value
 
+# Estimate the byte entropy using up to 4096 bytes
+# Sampling the start of the chunk in order to keep this check cheap on larger inpits
 def sample_entropy(data):
-    """Shannon byte entropy of the first at most 4096 bytes, bits/byte."""
     sample = data[:4096]
-    return -sum((n / len(sample)) * math.log2(n / len(sample))
-                for n in Counter(sample).values())    
+    return -sum(
+        (count / len(sample)) * math.log2(count / len(sample))
+        for count in Counter(sample).values()
+    )
 
-def measure(data, codec, destination, compressor, decompressor):
+# Read CPU limits and counters for the current cgroup
+class CgroupCPU:
+    def __init__(self, directory):
+        # If quotas change we can reject trials since we have the starting limits
+        # Also check that the counters are readable
+        self.directory = directory
+        self.initial_limits = self.limits()
+        self.snapshot()
+
+    def limits(self):
+        # cpu.max gives the allowed CPU time and the length of each period
+        quota, period = (
+            self.directory / "cpu.max"
+        ).read_text().split()
+
+        period = int(period)
+        quota = "max" if quota == "max" else int(quota)
+
+        if period <= 0 or (quota != "max" and quota <= 0):
+            raise ValueError("Invalid cpu.max")
+
+        return {
+            "quota_us": quota,
+            "period_us": period,
+            "quota_fraction": "" if quota == "max" else quota / period,
+        }
+
+    def snapshot(self):
+        lines = (self.directory / "cpu.stat").read_text().splitlines()
+        values = {
+            key: int(value)
+            for key, value in (line.split() for line in lines)
+        }
+
+        missing = set(STAT_KEYS) - values.keys()
+        if missing:
+            raise ValueError(
+                f"Missing cpu.stat counters: {sorted(missing)}"
+            )
+
+        return {key: values[key] for key in STAT_KEYS}
+
+    @staticmethod
+    def delta(before, after):
+        # Counters are cumulative so we subtract the starting readings
+        changes = {
+            key: after[key] - before[key]
+            for key in STAT_KEYS
+        }
+
+        if any(value < 0 for value in changes.values()):
+            raise ValueError(
+                "The Cgroup counters decreased, so discard the run"
+            )
+
+        return changes
+
+def detect_cgroup(required):
+    try:
+        if platform.system() != "Linux":
+            raise ValueError("The Cgroup CPU monitoring requires Linux")
+
+        # Here we find the cgroup the process is in
+        # V2 line starts with 0::
+        entries = Path("/proc/self/cgroup").read_text().splitlines()
+        entry = next(
+            (line for line in entries if line.startswith("0::")),
+            None,
+        )
+
+        if entry is None:
+            raise ValueError("There was no cgroup v2 membership found")
+
+        root = Path("/sys/fs/cgroup").resolve()
+        relative = entry.split(":", 2)[2].lstrip("/")
+        directory = (root / relative).resolve()
+
+        if not directory.is_relative_to(root):
+            raise ValueError(
+                "The Cgroup path is outside the supported mount"
+            )
+
+        return CgroupCPU(directory), None
+
+    except (OSError, ValueError) as error:
+        # Fail for the quota experiments
+        # Allow ordinary runs without Linux starts
+        if required:
+            raise ValueError(
+                f"The required cgroup CPU monitoring is unavailable: {error}"
+            ) from error
+
+        return None, str(error)
+
+
+def measure(data, codec, destination, compressor, decompressor, monitor):
+    # Leave the unavailable measurements blank 
+    cg_metrics = {key: "" for key in CG_FIELDS}
+    cg_metrics["cgroup_available"] = monitor is not None
+
+    if monitor:
+        limits = monitor.limits()
+
+        if limits != monitor.initial_limits:
+            raise ValueError(
+                "The CPU quota changed during the run, so discard this run"
+            )
+
+        cg_metrics.update(limits)
+        observation_start = time.perf_counter_ns()
+        before = monitor.snapshot()
+
+    # The CPU time is the work done by this process
     cpu_start = time.process_time_ns()
     start = time.perf_counter_ns()
+
     if codec == "none":
         encoded = data
     elif codec == "lz4":
         encoded = lz4.frame.compress(data, compression_level=0)
     else:
         encoded = compressor.compress(data)
+
     compressed = time.perf_counter_ns()
+
+    #Flushing the python buffer and then syncing the file, all three of the methods do this
     with destination.open("xb") as stream:
         stream.write(encoded)
         stream.flush()
         os.fsync(stream.fileno())
+
     finished = time.perf_counter_ns()
     cpu_us = (time.process_time_ns() - cpu_start) / 1000
 
-    # Read back the actual output, not the in-memory compressed buffer.
+    # Taking the second cgroup reading before the readback
+    if monitor:
+        after = monitor.snapshot()
+
+        cg_metrics["cgroup_observation_us"] = (
+            time.perf_counter_ns() - observation_start
+        ) / 1000
+
+        cg_metrics.update({
+            "cgroup_" + key: value
+            for key, value in monitor.delta(before, after).items()
+        })
+
+        if monitor.limits() != limits:
+            raise ValueError(
+                "the CPU quota changed during the trial, so discard this run"
+            )
+
+    # Verify that the file that was written, not just the buffer in mem
     saved = destination.read_bytes()
+
     if codec == "none":
         restored = saved
     elif codec == "lz4":
         restored = lz4.frame.decompress(saved)
     else:
         restored = decompressor.decompress(saved)
+
     if restored != data:
         raise RuntimeError(f"Verification failed: {destination}")
+
     latency_us = (finished - start) / 1000
+
     return {
+        # Counting the bytes in teh file
         "stored_bytes": len(saved),
         "compression_us": (compressed - start) / 1000,
         "write_sync_us": (finished - compressed) / 1000,
@@ -81,90 +253,239 @@ def measure(data, codec, destination, compressor, decompressor):
         "storage_savings_fraction": 1 - len(saved) / len(data),
         "throughput_mib_s": len(data) / 2**20 / (latency_us / 1e6),
         "verified": True,
+        **cg_metrics,
     }
 
 def run(args):
     source = args.input.resolve()
+
     if not source.is_file() or source.stat().st_size == 0:
         raise ValueError("Input must be a nonempty regular file")
-    # A fresh directory prevents overwriting previous results.
+
+    monitor, reason = detect_cgroup(args.require_cgroup)
+
+    if monitor:
+        print(f"Cgroup: {monitor.directory}")
+        limits = monitor.initial_limits
+        print(f"cpu.max: {limits['quota_us']} {limits['period_us']}")
+    else:
+        print(
+            "Cgroup monitoring unavailable; "
+            f"CPU-control CSV fields are blank: {reason}"
+        )
+
+    # Requiring a new output directory so the old results wont be overwritten
     args.output.mkdir(parents=True, exist_ok=False)
     scratch = args.output / "trial_files"
     scratch.mkdir()
+
     compressor = zstandard.ZstdCompressor(level=3, threads=0)
     decompressor = zstandard.ZstdDecompressor()
     rng = random.Random(args.seed)
+
+    # Saving the run settings alongside the CSV to make the test reproducable
+        # Save the settings we need to repeat this run.
     metadata = {
-        "status": "running", "started_utc": datetime.now(timezone.utc).isoformat(),
-        "platform": platform.platform(), "python": platform.python_version(),
-        "packages": {name: version(name) for name in ("lz4", "zstandard")},
-        "input": str(source), "input_bytes": source.stat().st_size,
-        "chunk_bytes": args.chunk_bytes, "repeats": args.repeats,
-        "seed": args.seed, "lz4_level": 0, "zstd_level": 3,
-        "zstd_worker_threads": 0, "cpu_controls": "not collected",
-        "scope": "Development baseline; not final experiments or ML training data",
-        "timing": "Compression plus file open/write/flush/fsync/close",
-        "excluded": "Input reads, entropy, verification, cleanup, ML inference",
-        "storage_metric": "Encoded file length, not allocated disk blocks",
+        "status": "running",
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "packages": {
+            "lz4": version("lz4"),
+            "zstandard": version("zstandard"),
+        },
+        "input": str(source),
+        "input_bytes": source.stat().st_size,
+        "chunk_bytes": args.chunk_bytes,
+        "repeats": args.repeats,
+        "seed": args.seed,
+        "lz4_level": 0,
+        "zstd_level": 3,
+        "zstd_worker_threads": 0,
+        "cgroup": {
+            "available": monitor is not None,
+            "unavailable_reason": reason,
+            "limits": monitor.initial_limits if monitor else None,
+        },
     }
+
     metadata_path = args.output / "metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-    totals = {c: {"input": 0, "stored": 0, "us": 0, "count": 0} for c in CODECS}
-    with (args.output / "baseline.csv").open("x", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=FIELDS)
-        writer.writeheader()
-        for repeat in range(args.repeats):
-            with source.open("rb") as stream:
-                chunk_index = 0
-                while True:
-                    data = stream.read(args.chunk_bytes)
-                    if not data:
-                        break
-                    entropy = sample_entropy(data)
-                    order = list(CODECS)
-                    rng.shuffle(order)
-                    for position, codec in enumerate(order):
-                        destination = scratch / f"r{repeat}_c{chunk_index}_{codec}.bin"
-                        metrics = measure(data, codec, destination, compressor, decompressor)
-                        writer.writerow({
-                            "workload_id": args.workload_id or source.name,
-                            "decision_id": f"r{repeat}_c{chunk_index}",
-                            "repeat": repeat, "chunk_index": chunk_index,
-                            "trial_order": position, "codec": codec,
-                            "chunk_bytes": len(data), "sample_entropy": entropy,
-                            **metrics,
-                        })
-                        total = totals[codec]
-                        total["input"] += len(data)
-                        total["stored"] += metrics["stored_bytes"]
-                        total["us"] += metrics["write_latency_us"]
-                        total["count"] += 1
-                        # Keep disk use bounded; failed verification leaves evidence.
-                        destination.unlink()
-                    chunk_index += 1
-            csv_file.flush()
-    scratch.rmdir()
-    metadata["status"] = "complete"
-    metadata["trials"] = sum(t["count"] for t in totals.values())
-    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-    for codec, t in totals.items():
-        print(f"{codec:4} | {t['count']} trials | "
-              f"savings {1 - t['stored'] / t['input']:.1%} | "
-              f"mean latency {t['us'] / t['count']:.1f} us | "
-              f"throughput {t['input'] / 2**20 / (t['us'] / 1e6):.2f} MiB/s")
-    print(f"All outputs verified. Results: {args.output / 'baseline.csv'}")
+
+    totals = {
+        codec: {
+            "input": 0,
+            "stored": 0,
+            "us": 0,
+            "count": 0,
+            "throttled_us": 0,
+        }
+        for codec in CODECS
+    }
+
+    # The readings cover the entire loop, including work done between timed writes
+    run_before = monitor.snapshot() if monitor else None
+    run_start = time.perf_counter_ns()
+
+    try:
+        with (args.output / "baseline.csv").open(
+            "x", newline=""
+        ) as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=FIELDS)
+            writer.writeheader()
+
+            for repeat in range(args.repeats):
+                with source.open("rb") as stream:
+                    chunk_index = 0
+
+                    while True:
+                        data = stream.read(args.chunk_bytes)
+                        if not data:
+                            break
+
+                        # Using the same input chunk for the three methods
+                        # Then shuffling the order so they arent in the same order always
+                        entropy = sample_entropy(data)
+                        order = list(CODECS)
+                        rng.shuffle(order)
+
+                        for position, codec in enumerate(order):
+                            destination = scratch / (
+                                f"r{repeat}_c{chunk_index}_{codec}.bin"
+                            )
+
+                            metrics = measure(
+                                data,
+                                codec,
+                                destination,
+                                compressor,
+                                decompressor,
+                                monitor,
+                            )
+
+                            # The three rows for the chunk and repeat share a decision id
+                            writer.writerow({
+                                "workload_id": (
+                                    args.workload_id or source.name
+                                ),
+                                "decision_id": (
+                                    f"r{repeat}_c{chunk_index}"
+                                ),
+                                "repeat": repeat,
+                                "chunk_index": chunk_index,
+                                "trial_order": position,
+                                "codec": codec,
+                                "chunk_bytes": len(data),
+                                "sample_entropy": entropy,
+                                **metrics,
+                            })
+
+                            total = totals[codec]
+                            total["input"] += len(data)
+                            total["stored"] += metrics["stored_bytes"]
+                            total["us"] += metrics["write_latency_us"]
+                            total["count"] += 1
+
+                            if monitor:
+                                total["throttled_us"] += (
+                                    metrics["cgroup_throttled_usec"]
+                                )
+
+                            # Removing each file after it is verified
+                            destination.unlink()
+
+                        chunk_index += 1
+
+                csv_file.flush()
+
+        if monitor:
+            metadata["run_cgroup_delta"] = monitor.delta(
+                run_before, monitor.snapshot()
+            )
+            metadata["run_cgroup_scope"] = (
+                "Entire benchmark loop, including input reads, entropy, "
+                "CSV logging, verification and cleanup"
+            )
+
+        metadata["run_elapsed_seconds"] = (
+            time.perf_counter_ns() - run_start
+        ) / 1e9
+
+        scratch.rmdir()
+        metadata["status"] = "complete"
+        metadata["trials"] = sum(
+            total["count"] for total in totals.values()
+        )
+
+    except (Exception, KeyboardInterrupt) as error:
+        metadata["status"] = "failed"
+        metadata["error"] = f"{type(error).__name__}: {error}"
+        raise
+
+    # Saving the final status no matter what
+    finally:
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2) + "\n"
+        )
+
+    for codec, total in totals.items():
+        savings = 1 - total["stored"] / total["input"]
+        mean_latency = total["us"] / total["count"]
+        # Dividing input size by compression and write time
+        throughput = (
+            total["input"] / 2**20 / (total["us"] / 1e6)
+        )
+
+        print(
+            f"{codec:4} | {total['count']} trials | "
+            f"savings {savings:.1%} | "
+            f"mean latency {mean_latency:.1f} us | "
+            f"throughput {throughput:.2f} MiB/s"
+        )
+
+        if monitor:
+            print(
+                "     The summed trial cgroup throttled time: "
+                f"{total['throttled_us']} us"
+            )
+
+    if monitor:
+        print(
+            "The whole loop cgroup counters:",
+            metadata["run_cgroup_delta"],
+        )
+
+    print(
+        f"All of the outputs were verified. Results: "
+        f"{args.output / 'baseline.csv'}"
+    )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
-    parser.add_argument("--chunk-bytes", type=positive_int, default=262144)
+    parser.add_argument(
+        "--chunk-bytes", type=positive_int, default=262144
+    )
     parser.add_argument("--repeats", type=positive_int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workload-id")
-    parser.add_argument("--output", type=Path, default=Path("artifacts") /
-                        datetime.now().strftime("baseline_%Y%m%d_%H%M%S_%f"))
+    parser.add_argument(
+        "--require-cgroup",
+        action="store_true",
+        help="Fail if cgroup CPU limits and counters cannot be read",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("artifacts") / datetime.now().strftime(
+            "baseline_%Y%m%d_%H%M%S_%f"
+        ),
+    )
+
     args = parser.parse_args()
+
     try:
         run(args)
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, RuntimeError) as error:
         parser.exit(1, f"Error: {error}\n")
