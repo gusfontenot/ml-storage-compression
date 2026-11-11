@@ -1,6 +1,11 @@
-# Comparing the compression methods and recording the Linux CPU quota stats
-# Run this from the repo root: python benchmarks/collect_measurements.py README.md
-# The CPU limits are set externally using systemd-run. Output is for benchmark testing not ML yet.
+"""Compare compression methods and record Linux CPU quota stats.
+
+Run this from the repo root:
+    python benchmarks/collect_measurements.py README.md
+
+CPU limits are set externally using systemd-run.
+This script writes raw benchmark measurements.
+"""
 
 import argparse
 from collections import Counter
@@ -14,13 +19,14 @@ from pathlib import Path
 import platform
 import random
 import time
+
 import lz4.frame
 import zstandard
 
-# Keeping the uncompressed case for us to have a baseline for size and write time
+# Keeping the uncompressed case gives us a baseline for size and write time.
 CODECS = ("none", "lz4", "zstd")
 
-# Counters from cpu.stat
+# Counters from cpu.stat. The *_usec values are in microseconds.
 STAT_KEYS = (
     "usage_usec",
     "user_usec",
@@ -30,7 +36,7 @@ STAT_KEYS = (
     "throttled_usec",
 )
 
-#Adding the CPU measurements to the end of each of the trial rows
+# Add the CPU measurements to each trial row.
 CG_FIELDS = (
     "cgroup_available",
     "quota_us",
@@ -60,15 +66,16 @@ FIELDS = (
     *CG_FIELDS,
 )
 
-# A zero chunk size would look like end of file, so zero repeats means no trials
+
+# A zero chunk size would look like end of file, and zero repeats means no trials.
 def positive_int(text):
     value = int(text)
     if value <= 0:
         raise argparse.ArgumentTypeError("Must be a positive integer.")
     return value
 
-# Estimate the byte entropy using up to 4096 bytes
-# Sampling the start of the chunk in order to keep this check cheap on larger inpits
+
+# Sample the start of the chunk to keep the entropy check cheap on large inputs.
 def sample_entropy(data):
     sample = data[:4096]
     return -sum(
@@ -76,21 +83,19 @@ def sample_entropy(data):
         for count in Counter(sample).values()
     )
 
-# Read CPU limits and counters for the current cgroup
+
+# Read CPU limits and counters for the current cgroup.
 class CgroupCPU:
     def __init__(self, directory):
-        # If quotas change we can reject trials since we have the starting limits
-        # Also check that the counters are readable
+        # Save the starting limits so we can tell if the quota changes.
         self.directory = directory
         self.initial_limits = self.limits()
+        # Check that the counters are readable before we start.
         self.snapshot()
 
     def limits(self):
-        # cpu.max gives the allowed CPU time and the length of each period
-        quota, period = (
-            self.directory / "cpu.max"
-        ).read_text().split()
-
+        # cpu.max gives the allowed CPU time and the length of each period.
+        quota, period = (self.directory / "cpu.max").read_text().split()
         period = int(period)
         quota = "max" if quota == "max" else int(quota)
 
@@ -112,39 +117,29 @@ class CgroupCPU:
 
         missing = set(STAT_KEYS) - values.keys()
         if missing:
-            raise ValueError(
-                f"Missing cpu.stat counters: {sorted(missing)}"
-            )
+            raise ValueError(f"Missing cpu.stat counters: {sorted(missing)}")
 
         return {key: values[key] for key in STAT_KEYS}
 
     @staticmethod
     def delta(before, after):
-        # Counters are cumulative so we subtract the starting readings
-        changes = {
-            key: after[key] - before[key]
-            for key in STAT_KEYS
-        }
+        # Counters are cumulative, so we subtract the starting readings.
+        changes = {key: after[key] - before[key] for key in STAT_KEYS}
 
         if any(value < 0 for value in changes.values()):
-            raise ValueError(
-                "The Cgroup counters decreased, so discard the run"
-            )
+            raise ValueError("The cgroup counters decreased, so discard the run")
 
         return changes
+
 
 def detect_cgroup(required):
     try:
         if platform.system() != "Linux":
-            raise ValueError("The Cgroup CPU monitoring requires Linux")
+            raise ValueError("Cgroup CPU monitoring requires Linux")
 
-        # Here we find the cgroup the process is in
-        # V2 line starts with 0::
+        # Find the cgroup this process is in. The v2 line starts with 0::.
         entries = Path("/proc/self/cgroup").read_text().splitlines()
-        entry = next(
-            (line for line in entries if line.startswith("0::")),
-            None,
-        )
+        entry = next((line for line in entries if line.startswith("0::")), None)
 
         if entry is None:
             raise ValueError("There was no cgroup v2 membership found")
@@ -154,15 +149,12 @@ def detect_cgroup(required):
         directory = (root / relative).resolve()
 
         if not directory.is_relative_to(root):
-            raise ValueError(
-                "The Cgroup path is outside the supported mount"
-            )
+            raise ValueError("The cgroup path is outside the supported mount")
 
         return CgroupCPU(directory), None
 
     except (OSError, ValueError) as error:
-        # Fail for the quota experiments
-        # Allow ordinary runs without Linux starts
+        # Fail for quota experiments, but allow ordinary runs without Linux stats.
         if required:
             raise ValueError(
                 f"The required cgroup CPU monitoring is unavailable: {error}"
@@ -172,7 +164,7 @@ def detect_cgroup(required):
 
 
 def measure(data, codec, destination, compressor, decompressor, monitor):
-    # Leave the unavailable measurements blank 
+    # Leave unavailable measurements blank so they aren't mistaken for zero.
     cg_metrics = {key: "" for key in CG_FIELDS}
     cg_metrics["cgroup_available"] = monitor is not None
 
@@ -180,15 +172,13 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
         limits = monitor.limits()
 
         if limits != monitor.initial_limits:
-            raise ValueError(
-                "The CPU quota changed during the run, so discard this run"
-            )
+            raise ValueError("The CPU quota changed during the run, so discard this run")
 
         cg_metrics.update(limits)
         observation_start = time.perf_counter_ns()
         before = monitor.snapshot()
 
-    # The CPU time is the work done by this process
+    # CPU time measures work done by this process. Elapsed time includes waits.
     cpu_start = time.process_time_ns()
     start = time.perf_counter_ns()
 
@@ -201,7 +191,7 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
 
     compressed = time.perf_counter_ns()
 
-    #Flushing the python buffer and then syncing the file, all three of the methods do this
+    # Flush the Python buffer and sync the file the same way for every codec.
     with destination.open("xb") as stream:
         stream.write(encoded)
         stream.flush()
@@ -210,25 +200,21 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
     finished = time.perf_counter_ns()
     cpu_us = (time.process_time_ns() - cpu_start) / 1000
 
-    # Taking the second cgroup reading before the readback
+    # Take the second cgroup reading before readback to leave verification out.
     if monitor:
         after = monitor.snapshot()
-
         cg_metrics["cgroup_observation_us"] = (
             time.perf_counter_ns() - observation_start
         ) / 1000
-
         cg_metrics.update({
             "cgroup_" + key: value
             for key, value in monitor.delta(before, after).items()
         })
 
         if monitor.limits() != limits:
-            raise ValueError(
-                "the CPU quota changed during the trial, so discard this run"
-            )
+            raise ValueError("The CPU quota changed during the trial, so discard this run")
 
-    # Verify that the file that was written, not just the buffer in mem
+    # Verify the file that was written, not just the buffer in memory.
     saved = destination.read_bytes()
 
     if codec == "none":
@@ -244,7 +230,7 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
     latency_us = (finished - start) / 1000
 
     return {
-        # Counting the bytes in teh file
+        # Count file bytes, not the number of disk blocks.
         "stored_bytes": len(saved),
         "compression_us": (compressed - start) / 1000,
         "write_sync_us": (finished - compressed) / 1000,
@@ -256,7 +242,10 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
         **cg_metrics,
     }
 
+
 def run(args):
+    # A single codec gets its own run and can be given its own cgroup.
+    codecs = CODECS if args.codec == "all" else (args.codec,)
     source = args.input.resolve()
 
     if not source.is_file() or source.stat().st_size == 0:
@@ -269,12 +258,9 @@ def run(args):
         limits = monitor.initial_limits
         print(f"cpu.max: {limits['quota_us']} {limits['period_us']}")
     else:
-        print(
-            "Cgroup monitoring unavailable; "
-            f"CPU-control CSV fields are blank: {reason}"
-        )
+        print(f"Cgroup monitoring unavailable; CPU-control CSV fields are blank: {reason}")
 
-    # Requiring a new output directory so the old results wont be overwritten
+    # Require a new output directory so old results aren't overwritten.
     args.output.mkdir(parents=True, exist_ok=False)
     scratch = args.output / "trial_files"
     scratch.mkdir()
@@ -283,8 +269,7 @@ def run(args):
     decompressor = zstandard.ZstdDecompressor()
     rng = random.Random(args.seed)
 
-    # Saving the run settings alongside the CSV to make the test reproducable
-        # Save the settings we need to repeat this run.
+    # Save the settings we need to repeat this run.
     metadata = {
         "status": "running",
         "started_utc": datetime.now(timezone.utc).isoformat(),
@@ -298,6 +283,7 @@ def run(args):
         "input_bytes": source.stat().st_size,
         "chunk_bytes": args.chunk_bytes,
         "repeats": args.repeats,
+        "codecs": list(codecs),
         "seed": args.seed,
         "lz4_level": 0,
         "zstd_level": 3,
@@ -313,24 +299,16 @@ def run(args):
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
     totals = {
-        codec: {
-            "input": 0,
-            "stored": 0,
-            "us": 0,
-            "count": 0,
-            "throttled_us": 0,
-        }
-        for codec in CODECS
+        codec: {"input": 0, "stored": 0, "us": 0, "count": 0, "throttled_us": 0}
+        for codec in codecs
     }
 
-    # The readings cover the entire loop, including work done between timed writes
+    # These readings cover the entire loop, including work between timed writes.
     run_before = monitor.snapshot() if monitor else None
     run_start = time.perf_counter_ns()
 
     try:
-        with (args.output / "baseline.csv").open(
-            "x", newline=""
-        ) as csv_file:
+        with (args.output / "baseline.csv").open("x", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=FIELDS)
             writer.writeheader()
 
@@ -343,34 +321,24 @@ def run(args):
                         if not data:
                             break
 
-                        # Using the same input chunk for the three methods
-                        # Then shuffling the order so they arent in the same order always
                         entropy = sample_entropy(data)
-                        order = list(CODECS)
-                        rng.shuffle(order)
+                        order = list(codecs)
+                        # In all-codec mode, shuffle so one codec isn't always first.
+                        # These trials still share a quota, so order can affect timing.
+                        if args.codec == "all":
+                            rng.shuffle(order)
 
                         for position, codec in enumerate(order):
-                            destination = scratch / (
-                                f"r{repeat}_c{chunk_index}_{codec}.bin"
-                            )
-
+                            destination = scratch / f"r{repeat}_c{chunk_index}_{codec}.bin"
                             metrics = measure(
-                                data,
-                                codec,
-                                destination,
-                                compressor,
-                                decompressor,
-                                monitor,
+                                data, codec, destination,
+                                compressor, decompressor, monitor,
                             )
 
-                            # The three rows for the chunk and repeat share a decision id
+                            # The chunk and repeat ID stays the same across codecs.
                             writer.writerow({
-                                "workload_id": (
-                                    args.workload_id or source.name
-                                ),
-                                "decision_id": (
-                                    f"r{repeat}_c{chunk_index}"
-                                ),
+                                "workload_id": args.workload_id or source.name,
+                                "decision_id": f"r{repeat}_c{chunk_index}",
                                 "repeat": repeat,
                                 "chunk_index": chunk_index,
                                 "trial_order": position,
@@ -387,11 +355,9 @@ def run(args):
                             total["count"] += 1
 
                             if monitor:
-                                total["throttled_us"] += (
-                                    metrics["cgroup_throttled_usec"]
-                                )
+                                total["throttled_us"] += metrics["cgroup_throttled_usec"]
 
-                            # Removing each file after it is verified
+                            # Remove each file after it is verified.
                             destination.unlink()
 
                         chunk_index += 1
@@ -399,42 +365,31 @@ def run(args):
                 csv_file.flush()
 
         if monitor:
-            metadata["run_cgroup_delta"] = monitor.delta(
-                run_before, monitor.snapshot()
-            )
+            metadata["run_cgroup_delta"] = monitor.delta(run_before, monitor.snapshot())
             metadata["run_cgroup_scope"] = (
                 "Entire benchmark loop, including input reads, entropy, "
                 "CSV logging, verification and cleanup"
             )
 
-        metadata["run_elapsed_seconds"] = (
-            time.perf_counter_ns() - run_start
-        ) / 1e9
-
+        metadata["run_elapsed_seconds"] = (time.perf_counter_ns() - run_start) / 1e9
         scratch.rmdir()
         metadata["status"] = "complete"
-        metadata["trials"] = sum(
-            total["count"] for total in totals.values()
-        )
+        metadata["trials"] = sum(total["count"] for total in totals.values())
 
     except (Exception, KeyboardInterrupt) as error:
         metadata["status"] = "failed"
         metadata["error"] = f"{type(error).__name__}: {error}"
         raise
 
-    # Saving the final status no matter what
     finally:
-        metadata_path.write_text(
-            json.dumps(metadata, indent=2) + "\n"
-        )
+        # Save the final status even if a trial fails.
+        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
     for codec, total in totals.items():
         savings = 1 - total["stored"] / total["input"]
         mean_latency = total["us"] / total["count"]
-        # Dividing input size by compression and write time
-        throughput = (
-            total["input"] / 2**20 / (total["us"] / 1e6)
-        )
+        # Divide the input size by the time spent compressing and writing.
+        throughput = total["input"] / 2**20 / (total["us"] / 1e6)
 
         print(
             f"{codec:4} | {total['count']} trials | "
@@ -450,26 +405,22 @@ def run(args):
             )
 
     if monitor:
-        print(
-            "The whole loop cgroup counters:",
-            metadata["run_cgroup_delta"],
-        )
+        print("The whole loop cgroup counters:", metadata["run_cgroup_delta"])
 
-    print(
-        f"All of the outputs were verified. Results: "
-        f"{args.output / 'baseline.csv'}"
-    )
+    print(f"All of the outputs were verified. Results: {args.output / 'baseline.csv'}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
-    parser.add_argument(
-        "--chunk-bytes", type=positive_int, default=262144
-    )
+    parser.add_argument("--chunk-bytes", type=positive_int, default=262144)
     parser.add_argument("--repeats", type=positive_int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workload-id")
+    parser.add_argument(
+        "--codec", choices=("all", *CODECS), default="all",
+        help="Run one fixed codec, or all three in the same run (default).",
+    )
     parser.add_argument(
         "--require-cgroup",
         action="store_true",
