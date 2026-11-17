@@ -1,0 +1,127 @@
+{
+  "input_data": "data/compression_pilot.csv",
+  "seed": 42,
+  "budget_us": 1000.0,
+  "data_sha256": "2d381c94874a02f222de243891a68d342854169c4253d28184345831812bf6fd",
+  "training_workloads": [
+    "random",
+    "repetitive"
+  ],
+  "test_workloads": [
+    "mixed"
+  ],
+  "training_decisions": 64,
+  "test_decisions": 32,
+  "training_ranges": {
+    "chunk_bytes": [
+      1048576.0,
+      1048576.0
+    ],
+    "sample_entropy": [
+      3.0,
+      7.961194426278566
+    ],
+    "quota_fraction": [
+      0.25,
+      0.5
+    ],
+    "period_us": [
+      100000.0,
+      100000.0
+    ]
+  },
+  "features": [
+    "chunk_bytes",
+    "sample_entropy",
+    "quota_fraction",
+    "period_us"
+  ],
+  "measurement_rows": 288,
+  "metrics": {
+    "none": {
+      "decisions": 32,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 897.27671875,
+      "p95_write_latency_us": 1760.713,
+      "budget_miss_fraction": 0.25,
+      "replayed_serial_throughput_mib_s": 1114.4833908017856,
+      "mean_prediction_us": 0,
+      "codec_counts": {
+        "none": 32,
+        "lz4": 0,
+        "zstd": 0
+      }
+    },
+    "lz4": {
+      "decisions": 32,
+      "storage_savings_fraction": 0.494873046875,
+      "mean_write_latency_us": 1036.78490625,
+      "p95_write_latency_us": 2122.964,
+      "budget_miss_fraction": 0.25,
+      "replayed_serial_throughput_mib_s": 964.520214339299,
+      "mean_prediction_us": 0,
+      "codec_counts": {
+        "none": 0,
+        "lz4": 32,
+        "zstd": 0
+      }
+    },
+    "zstd": {
+      "decisions": 32,
+      "storage_savings_fraction": 0.49744200706481934,
+      "mean_write_latency_us": 4291.36228125,
+      "p95_write_latency_us": 4681.261,
+      "budget_miss_fraction": 1.0,
+      "replayed_serial_throughput_mib_s": 233.0262360670974,
+      "mean_prediction_us": 0,
+      "codec_counts": {
+        "none": 0,
+        "lz4": 0,
+        "zstd": 32
+      }
+    },
+    "ml_selector": {
+      "decisions": 32,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 897.27671875,
+      "p95_write_latency_us": 1760.713,
+      "budget_miss_fraction": 0.25,
+      "replayed_serial_throughput_mib_s": 1114.4833908017856,
+      "mean_prediction_us": 5.11778125,
+      "codec_counts": {
+        "none": 32,
+        "lz4": 0,
+        "zstd": 0
+      }
+    },
+    "ml_without_quota_throttling": {
+      "decisions": 32,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 897.27671875,
+      "p95_write_latency_us": 1760.713,
+      "budget_miss_fraction": 0.25,
+      "replayed_serial_throughput_mib_s": 1114.4833908017856,
+      "mean_prediction_us": 3.9778124999999998,
+      "codec_counts": {
+        "none": 32,
+        "lz4": 0,
+        "zstd": 0
+      }
+    }
+  },
+  "prediction_mae": {
+    "none": {
+      "stored_bytes": 0.0,
+      "write_latency_us": 231.64290104166665
+    },
+    "lz4": {
+      "stored_bytes": 518995.0,
+      "write_latency_us": 211.12278124999997
+    },
+    "zstd": {
+      "stored_bytes": 521638.75,
+      "write_latency_us": 3405.5585312499998
+    }
+  },
+  "limitations": "Offline replay; prediction timing only. Live overhead excluded."
+}

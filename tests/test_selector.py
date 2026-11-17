@@ -1,9 +1,16 @@
 import csv
+from argparse import Namespace
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from examples.make_demo_data import generate
-from compression_ml.selector import BASIC, CODECS, FEATURES, choose, evaluate, load_data, predict, train
+from compression_ml.selector import (
+    BASIC, CODECS, FEATURES, PILOT_FEATURES,
+    choose, evaluate, load_data, load_model, predict, run, split_workloads, train,
+)
 
 
 class SelectorTests(unittest.TestCase):
@@ -63,6 +70,48 @@ class SelectorTests(unittest.TestCase):
                     writer.writerows(rows)
                 with self.assertRaises(ValueError):
                     load_data(path)
+
+    def test_four_feature_data_and_workload_holdout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pilot.csv"
+            generate(path)
+            with path.open() as stream:
+                rows = list(csv.DictReader(stream))
+            fields = ["workload_id", "decision_id", "codec", *PILOT_FEATURES, "stored_bytes", "write_latency_us"]
+            with path.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fields, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+            groups = load_data(path)
+            self.assertNotIn("cpu_utilization", next(iter(groups.values()))["none"])
+            training, testing, holdout = split_workloads(groups, "synthetic-7")
+            self.assertEqual(holdout, "synthetic-7")
+            self.assertEqual(len(testing), 30)
+            self.assertEqual({g["none"]["workload_id"] for g in testing}, {holdout})
+            self.assertNotIn(holdout, {g["none"]["workload_id"] for g in training})
+            test_quotas = {group["none"]["quota_fraction"] for group in testing}
+            expected_quotas = {
+                group["none"]["quota_fraction"]
+                for key, group in groups.items() if key[0] == holdout
+            }
+            self.assertEqual(test_quotas, expected_quotas)
+            with self.assertRaises(ValueError):
+                load_data(path, "full")
+            with self.assertRaises(ValueError):
+                split_workloads(groups, "unknown")
+            output = Path(directory) / "models"
+            with contextlib.redirect_stdout(io.StringIO()):
+                run(Namespace(
+                    data=path, feature_set="pilot", holdout_workload=holdout,
+                    budget_us=1000, output=output,
+                ))
+            model = load_model(output / "model.json")
+            report = json.loads((output / "evaluation.json").read_text())
+            self.assertEqual(model["features"], list(PILOT_FEATURES))
+            self.assertEqual(model["training"]["test_workloads"], [holdout])
+            self.assertEqual(report["test_decisions"], 30)
+            self.assertEqual(report["measurement_rows"], 720)
+            self.assertEqual(set(predict(model, testing[0]["none"])), set(CODECS))
 
 
 if __name__ == "__main__":

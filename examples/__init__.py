@@ -1,1 +1,1 @@
-"""Synthetic examples for development checks."""
+"""Demo data."""

@@ -1,0 +1,2 @@
+# Preserve CSV bytes and line endings.
+*.csv -text whitespace=trailing-space,space-before-tab,cr-at-eol

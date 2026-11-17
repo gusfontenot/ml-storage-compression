@@ -1,11 +1,4 @@
-"""Compare compression methods and record Linux CPU quota stats.
-
-Run this from the repo root:
-    python benchmarks/collect_measurements.py README.md
-
-CPU limits are set externally using systemd-run.
-This script writes raw benchmark measurements.
-"""
+"""Compression benchmarks and CPU measurements."""
 
 import argparse
 from collections import Counter
@@ -18,15 +11,20 @@ import os
 from pathlib import Path
 import platform
 import random
+import sys
 import time
 
 import lz4.frame
 import zstandard
 
-# Keeping the uncompressed case gives us a baseline for size and write time.
+# Direct script imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from compression_ml.selector import PILOT_FEATURES, choose, load_model, predict
+
 CODECS = ("none", "lz4", "zstd")
 
-# Counters from cpu.stat. The *_usec values are in microseconds.
+# CPU counters (times in microseconds).
 STAT_KEYS = (
     "usage_usec",
     "user_usec",
@@ -36,7 +34,7 @@ STAT_KEYS = (
     "throttled_usec",
 )
 
-# Add the CPU measurements to each trial row.
+# CSV fields.
 CG_FIELDS = (
     "cgroup_available",
     "quota_us",
@@ -63,11 +61,19 @@ FIELDS = (
     "storage_savings_fraction",
     "throughput_mib_s",
     "verified",
+    "policy",
+    "feature_collection_us",
+    "prediction_us",
+    "decision_write_latency_us",
+    "decision_cpu_time_us",
+    "decision_throughput_mib_s",
+    "budget_us",
+    "budget_missed",
+    "outside_training_range",
     *CG_FIELDS,
 )
 
 
-# A zero chunk size would look like end of file, and zero repeats means no trials.
 def positive_int(text):
     value = int(text)
     if value <= 0:
@@ -75,7 +81,7 @@ def positive_int(text):
     return value
 
 
-# Sample the start of the chunk to keep the entropy check cheap on large inputs.
+# First 4 KiB.
 def sample_entropy(data):
     sample = data[:4096]
     return -sum(
@@ -84,17 +90,14 @@ def sample_entropy(data):
     )
 
 
-# Read CPU limits and counters for the current cgroup.
+# CPU limits and counters.
 class CgroupCPU:
     def __init__(self, directory):
-        # Save the starting limits so we can tell if the quota changes.
         self.directory = directory
         self.initial_limits = self.limits()
-        # Check that the counters are readable before we start.
         self.snapshot()
 
     def limits(self):
-        # cpu.max gives the allowed CPU time and the length of each period.
         quota, period = (self.directory / "cpu.max").read_text().split()
         period = int(period)
         quota = "max" if quota == "max" else int(quota)
@@ -123,11 +126,10 @@ class CgroupCPU:
 
     @staticmethod
     def delta(before, after):
-        # Counters are cumulative, so we subtract the starting readings.
         changes = {key: after[key] - before[key] for key in STAT_KEYS}
 
         if any(value < 0 for value in changes.values()):
-            raise ValueError("The cgroup counters decreased, so discard the run")
+            raise ValueError("CPU counters decreased")
 
         return changes
 
@@ -137,34 +139,32 @@ def detect_cgroup(required):
         if platform.system() != "Linux":
             raise ValueError("Cgroup CPU monitoring requires Linux")
 
-        # Find the cgroup this process is in. The v2 line starts with 0::.
+        # Cgroup v2 path.
         entries = Path("/proc/self/cgroup").read_text().splitlines()
         entry = next((line for line in entries if line.startswith("0::")), None)
 
         if entry is None:
-            raise ValueError("There was no cgroup v2 membership found")
+            raise ValueError("Cgroup v2 not found")
 
         root = Path("/sys/fs/cgroup").resolve()
         relative = entry.split(":", 2)[2].lstrip("/")
         directory = (root / relative).resolve()
 
         if not directory.is_relative_to(root):
-            raise ValueError("The cgroup path is outside the supported mount")
+            raise ValueError("Cgroup path outside mount")
 
         return CgroupCPU(directory), None
 
     except (OSError, ValueError) as error:
-        # Fail for quota experiments, but allow ordinary runs without Linux stats.
         if required:
-            raise ValueError(
-                f"The required cgroup CPU monitoring is unavailable: {error}"
-            ) from error
+            raise ValueError(f"CPU monitoring unavailable: {error}") from error
 
         return None, str(error)
 
 
-def measure(data, codec, destination, compressor, decompressor, monitor):
-    # Leave unavailable measurements blank so they aren't mistaken for zero.
+def measure(data, codec, destination, compressor, decompressor, monitor,
+            decision_start=None, decision_cpu_start=None):
+    # Missing measurements stay blank.
     cg_metrics = {key: "" for key in CG_FIELDS}
     cg_metrics["cgroup_available"] = monitor is not None
 
@@ -172,15 +172,19 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
         limits = monitor.limits()
 
         if limits != monitor.initial_limits:
-            raise ValueError("The CPU quota changed during the run, so discard this run")
+            raise ValueError("CPU quota changed during run")
 
         cg_metrics.update(limits)
         observation_start = time.perf_counter_ns()
         before = monitor.snapshot()
 
-    # CPU time measures work done by this process. Elapsed time includes waits.
+    # Compression and write timers.
     cpu_start = time.process_time_ns()
     start = time.perf_counter_ns()
+    if decision_start is None:
+        decision_start = start
+    if decision_cpu_start is None:
+        decision_cpu_start = cpu_start
 
     if codec == "none":
         encoded = data
@@ -191,16 +195,18 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
 
     compressed = time.perf_counter_ns()
 
-    # Flush the Python buffer and sync the file the same way for every codec.
+    # Write and sync.
     with destination.open("xb") as stream:
         stream.write(encoded)
         stream.flush()
         os.fsync(stream.fileno())
 
     finished = time.perf_counter_ns()
-    cpu_us = (time.process_time_ns() - cpu_start) / 1000
+    cpu_finished = time.process_time_ns()
+    cpu_us = (cpu_finished - cpu_start) / 1000
+    decision_us = (finished - decision_start) / 1000
 
-    # Take the second cgroup reading before readback to leave verification out.
+    # CPU measurements (before readback).
     if monitor:
         after = monitor.snapshot()
         cg_metrics["cgroup_observation_us"] = (
@@ -212,9 +218,9 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
         })
 
         if monitor.limits() != limits:
-            raise ValueError("The CPU quota changed during the trial, so discard this run")
+            raise ValueError("CPU quota changed during trial")
 
-    # Verify the file that was written, not just the buffer in memory.
+    # Readback check.
     saved = destination.read_bytes()
 
     if codec == "none":
@@ -230,7 +236,7 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
     latency_us = (finished - start) / 1000
 
     return {
-        # Count file bytes, not the number of disk blocks.
+        # File size in bytes.
         "stored_bytes": len(saved),
         "compression_us": (compressed - start) / 1000,
         "write_sync_us": (finished - compressed) / 1000,
@@ -239,28 +245,44 @@ def measure(data, codec, destination, compressor, decompressor, monitor):
         "storage_savings_fraction": 1 - len(saved) / len(data),
         "throughput_mib_s": len(data) / 2**20 / (latency_us / 1e6),
         "verified": True,
+        "decision_write_latency_us": decision_us,
+        "decision_cpu_time_us": (cpu_finished - decision_cpu_start) / 1000,
+        "decision_throughput_mib_s": len(data) / 2**20 / (decision_us / 1e6),
         **cg_metrics,
     }
 
 
 def run(args):
-    # A single codec gets its own run and can be given its own cgroup.
-    codecs = CODECS if args.codec == "all" else (args.codec,)
+    # Model.
+    model = None
+    if args.codec == "ml":
+        if args.model is None or args.budget_us is None:
+            raise ValueError("--codec ml requires --model and --budget-us")
+        if not math.isfinite(args.budget_us) or args.budget_us <= 0:
+            raise ValueError("--budget-us must be positive and finite")
+        model = load_model(args.model)
+        if tuple(model["features"]) != PILOT_FEATURES:
+            raise ValueError("Four-feature pilot model required")
+    elif args.model is not None or args.budget_us is not None:
+        raise ValueError("Use --codec ml with --model and --budget-us")
+    codecs = CODECS if args.codec in ("all", "ml") else (args.codec,)
     source = args.input.resolve()
 
     if not source.is_file() or source.stat().st_size == 0:
-        raise ValueError("Input must be a nonempty regular file")
+        raise ValueError("Nonempty input file required")
 
-    monitor, reason = detect_cgroup(args.require_cgroup)
+    monitor, reason = detect_cgroup(args.require_cgroup or model is not None)
+    if model is not None and monitor.initial_limits["quota_us"] == "max":
+        raise ValueError("ML mode requires a finite CPU quota")
 
     if monitor:
         print(f"Cgroup: {monitor.directory}")
         limits = monitor.initial_limits
         print(f"cpu.max: {limits['quota_us']} {limits['period_us']}")
     else:
-        print(f"Cgroup monitoring unavailable; CPU-control CSV fields are blank: {reason}")
+        print(f"CPU stats: unavailable ({reason}); CSV fields blank")
 
-    # Require a new output directory so old results aren't overwritten.
+    # Output directory (must be new).
     args.output.mkdir(parents=True, exist_ok=False)
     scratch = args.output / "trial_files"
     scratch.mkdir()
@@ -269,7 +291,7 @@ def run(args):
     decompressor = zstandard.ZstdDecompressor()
     rng = random.Random(args.seed)
 
-    # Save the settings we need to repeat this run.
+    # Run settings.
     metadata = {
         "status": "running",
         "started_utc": datetime.now(timezone.utc).isoformat(),
@@ -284,6 +306,10 @@ def run(args):
         "chunk_bytes": args.chunk_bytes,
         "repeats": args.repeats,
         "codecs": list(codecs),
+        "policy": args.codec,
+        "model": str(args.model.resolve()) if model is not None else None,
+        "model_training": model.get("training") if model is not None else None,
+        "budget_us": args.budget_us,
         "seed": args.seed,
         "lz4_level": 0,
         "zstd_level": 3,
@@ -299,11 +325,12 @@ def run(args):
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
     totals = {
-        codec: {"input": 0, "stored": 0, "us": 0, "count": 0, "throttled_us": 0}
+        codec: {"input": 0, "stored": 0, "us": 0, "decision_us": 0,
+                "prediction_us": 0, "budget_misses": 0, "count": 0, "throttled_us": 0}
         for codec in codecs
     }
 
-    # These readings cover the entire loop, including work between timed writes.
+    # Whole-run timers.
     run_before = monitor.snapshot() if monitor else None
     run_start = time.perf_counter_ns()
 
@@ -321,21 +348,43 @@ def run(args):
                         if not data:
                             break
 
-                        entropy = sample_entropy(data)
-                        order = list(codecs)
-                        # In all-codec mode, shuffle so one codec isn't always first.
-                        # These trials still share a quota, so order can affect timing.
+                        order = ["ml"] if model is not None else list(codecs)
+                        # Shared quota; shuffle codec order.
                         if args.codec == "all":
                             rng.shuffle(order)
 
                         for position, codec in enumerate(order):
+                            decision_cpu_start = time.process_time_ns()
+                            decision_start = time.perf_counter_ns()
+                            entropy = sample_entropy(data)
+                            context = {"chunk_bytes": len(data), "sample_entropy": entropy}
+                            if model is not None:
+                                limits = monitor.limits()
+                                context["quota_fraction"] = limits["quota_fraction"]
+                                context["period_us"] = limits["period_us"]
+                            features_finished = time.perf_counter_ns()
+                            prediction_us = 0
+                            outside_range = ""
+                            if model is not None:
+                                codec = choose(predict(model, context), args.budget_us)
+                                prediction_us = (time.perf_counter_ns() - features_finished) / 1000
+                                ranges = model.get("training", {}).get("training_ranges", {})
+                                outside_range = False
+                                for feature, (low, high) in ranges.items():
+                                    if context[feature] < low or context[feature] > high:
+                                        outside_range = True
                             destination = scratch / f"r{repeat}_c{chunk_index}_{codec}.bin"
                             metrics = measure(
                                 data, codec, destination,
                                 compressor, decompressor, monitor,
+                                decision_start, decision_cpu_start,
+                            )
+                            budget_missed = (
+                                metrics["decision_write_latency_us"] > args.budget_us
+                                if model is not None else ""
                             )
 
-                            # The chunk and repeat ID stays the same across codecs.
+                            # CSV row.
                             writer.writerow({
                                 "workload_id": args.workload_id or source.name,
                                 "decision_id": f"r{repeat}_c{chunk_index}",
@@ -345,6 +394,12 @@ def run(args):
                                 "codec": codec,
                                 "chunk_bytes": len(data),
                                 "sample_entropy": entropy,
+                                "policy": args.codec,
+                                "feature_collection_us": (features_finished - decision_start) / 1000,
+                                "prediction_us": prediction_us,
+                                "budget_us": args.budget_us if model is not None else "",
+                                "budget_missed": budget_missed,
+                                "outside_training_range": outside_range,
                                 **metrics,
                             })
 
@@ -352,12 +407,14 @@ def run(args):
                             total["input"] += len(data)
                             total["stored"] += metrics["stored_bytes"]
                             total["us"] += metrics["write_latency_us"]
+                            total["decision_us"] += metrics["decision_write_latency_us"]
+                            total["prediction_us"] += prediction_us
+                            total["budget_misses"] += int(bool(budget_missed))
                             total["count"] += 1
 
                             if monitor:
                                 total["throttled_us"] += metrics["cgroup_throttled_usec"]
 
-                            # Remove each file after it is verified.
                             destination.unlink()
 
                         chunk_index += 1
@@ -367,14 +424,23 @@ def run(args):
         if monitor:
             metadata["run_cgroup_delta"] = monitor.delta(run_before, monitor.snapshot())
             metadata["run_cgroup_scope"] = (
-                "Entire benchmark loop, including input reads, entropy, "
-                "CSV logging, verification and cleanup"
+                "Whole loop: reads, features, selection, writes, verification, logging, cleanup"
             )
 
         metadata["run_elapsed_seconds"] = (time.perf_counter_ns() - run_start) / 1e9
         scratch.rmdir()
         metadata["status"] = "complete"
         metadata["trials"] = sum(total["count"] for total in totals.values())
+        metadata["codec_counts"] = {codec: total["count"] for codec, total in totals.items()}
+        total_input = sum(t["input"] for t in totals.values())
+        total_decision_us = sum(t["decision_us"] for t in totals.values())
+        prediction_us = sum(total["prediction_us"] for total in totals.values())
+        misses = sum(total["budget_misses"] for total in totals.values())
+        metadata["decision_throughput_mib_s"] = total_input / 2**20 / (total_decision_us / 1e6)
+        metadata["mean_prediction_us"] = prediction_us / metadata["trials"]
+        metadata["budget_miss_fraction"] = (
+            misses / metadata["trials"] if model is not None else None
+        )
 
     except (Exception, KeyboardInterrupt) as error:
         metadata["status"] = "failed"
@@ -382,32 +448,31 @@ def run(args):
         raise
 
     finally:
-        # Save the final status even if a trial fails.
+        # Final status.
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
     for codec, total in totals.items():
+        if total["count"] == 0:
+            continue
         savings = 1 - total["stored"] / total["input"]
         mean_latency = total["us"] / total["count"]
-        # Divide the input size by the time spent compressing and writing.
         throughput = total["input"] / 2**20 / (total["us"] / 1e6)
 
         print(
-            f"{codec:4} | {total['count']} trials | "
-            f"savings {savings:.1%} | "
-            f"mean latency {mean_latency:.1f} us | "
-            f"throughput {throughput:.2f} MiB/s"
+            f"{codec:4} | trials: {total['count']} | "
+            f"savings: {savings:.1%} | write_us: {mean_latency:.1f} | "
+            f"MiB/s: {throughput:.2f}"
         )
 
         if monitor:
-            print(
-                "     The summed trial cgroup throttled time: "
-                f"{total['throttled_us']} us"
-            )
+            print(f"  Throttled_us: {total['throttled_us']}")
 
     if monitor:
-        print("The whole loop cgroup counters:", metadata["run_cgroup_delta"])
+        print("Run CPU counters:", metadata["run_cgroup_delta"])
 
-    print(f"All of the outputs were verified. Results: {args.output / 'baseline.csv'}")
+    print("Readback: passed")
+    print(f"Results: {args.output / 'baseline.csv'}")
+    print(f"Decision MiB/s: {metadata['decision_throughput_mib_s']:.2f}")
 
 
 if __name__ == "__main__":
@@ -418,13 +483,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workload-id")
     parser.add_argument(
-        "--codec", choices=("all", *CODECS), default="all",
-        help="Run one fixed codec, or all three in the same run (default).",
+        "--codec", choices=("all", "ml", *CODECS), default="all",
+        help="Fixed codec, all codecs, or ML",
     )
+    parser.add_argument("--model", type=Path, help="ML model JSON")
+    parser.add_argument("--budget-us", type=float, help="ML write budget (microseconds)")
     parser.add_argument(
         "--require-cgroup",
         action="store_true",
-        help="Fail if cgroup CPU limits and counters cannot be read",
+        help="Require CPU limits and counters",
     )
     parser.add_argument(
         "--output",
