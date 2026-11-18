@@ -1,0 +1,138 @@
+{
+  "input_data": "data/local_ubuntu_expanded_01/development.csv",
+  "budget_us": 1000.0,
+  "tree_settings": {
+    "max_depth": 5,
+    "min_samples_leaf": 2
+  },
+  "evaluation_role": "validation",
+  "code_sha256": "56b90ee746cecad7516fa6a5ac1007bf744776c336e7f73cf8de6afa4b60fadb",
+  "data_sha256": "ada192bb41854d0ca575fb4f39f6d958f7b9d1e27a6cd444eb3448828142a8eb",
+  "training_workloads": [
+    "mix_1024",
+    "mix_2560",
+    "mix_3584",
+    "mix_512",
+    "mixed",
+    "random",
+    "repetitive"
+  ],
+  "test_workloads": [
+    "mix_3072"
+  ],
+  "training_decisions": 560,
+  "test_decisions": 80,
+  "seed": 42,
+  "training_ranges": {
+    "chunk_bytes": [
+      1048576.0,
+      1048576.0
+    ],
+    "sample_entropy": [
+      3.0,
+      7.960701395783121
+    ],
+    "quota_fraction": [
+      0.25,
+      0.5
+    ],
+    "period_us": [
+      100000.0,
+      100000.0
+    ]
+  },
+  "features": [
+    "chunk_bytes",
+    "sample_entropy",
+    "quota_fraction",
+    "period_us"
+  ],
+  "measurement_rows": 1920,
+  "metrics": {
+    "none": {
+      "decisions": 80,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 12740.3778375,
+      "p95_write_latency_us": 28447.031,
+      "budget_miss_fraction": 1.0,
+      "replayed_serial_throughput_mib_s": 78.49060779473919,
+      "mean_prediction_us": 0,
+      "codec_counts": {
+        "none": 80,
+        "lz4": 0,
+        "zstd": 0
+      }
+    },
+    "lz4": {
+      "decisions": 80,
+      "storage_savings_fraction": 0.24457859992980957,
+      "mean_write_latency_us": 11133.85435,
+      "p95_write_latency_us": 19043.707,
+      "budget_miss_fraction": 1.0,
+      "replayed_serial_throughput_mib_s": 89.81615607357034,
+      "mean_prediction_us": 0,
+      "codec_counts": {
+        "none": 0,
+        "lz4": 80,
+        "zstd": 0
+      }
+    },
+    "zstd": {
+      "decisions": 80,
+      "storage_savings_fraction": 0.248704195022583,
+      "mean_write_latency_us": 16489.4147625,
+      "p95_write_latency_us": 44339.8,
+      "budget_miss_fraction": 1.0,
+      "replayed_serial_throughput_mib_s": 60.64496614362482,
+      "mean_prediction_us": 0,
+      "codec_counts": {
+        "none": 0,
+        "lz4": 0,
+        "zstd": 80
+      }
+    },
+    "ml_selector": {
+      "decisions": 80,
+      "storage_savings_fraction": 0.248704195022583,
+      "mean_write_latency_us": 16489.4147625,
+      "p95_write_latency_us": 44339.8,
+      "budget_miss_fraction": 1.0,
+      "replayed_serial_throughput_mib_s": 60.64496614362482,
+      "mean_prediction_us": 5.52575,
+      "codec_counts": {
+        "none": 0,
+        "lz4": 0,
+        "zstd": 80
+      }
+    },
+    "ml_without_quota_throttling": {
+      "decisions": 80,
+      "storage_savings_fraction": 0.248704195022583,
+      "mean_write_latency_us": 16489.4147625,
+      "p95_write_latency_us": 44339.8,
+      "budget_miss_fraction": 1.0,
+      "replayed_serial_throughput_mib_s": 60.64496614362482,
+      "mean_prediction_us": 5.0854875,
+      "codec_counts": {
+        "none": 0,
+        "lz4": 0,
+        "zstd": 80
+      }
+    }
+  },
+  "prediction_mae": {
+    "none": {
+      "stored_bytes": 0.0,
+      "write_latency_us": 11427.375418277776
+    },
+    "lz4": {
+      "stored_bytes": 131032.25,
+      "write_latency_us": 15567.69745
+    },
+    "zstd": {
+      "stored_bytes": 133962.25,
+      "write_latency_us": 11485.1709175
+    }
+  },
+  "limitations": "Offline replay; prediction timing only. Live overhead excluded."
+}

@@ -1,0 +1,138 @@
+{
+  "environment": {
+    "label": "local Ubuntu",
+    "platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "os_release": {
+      "NAME": "Ubuntu",
+      "ID": "ubuntu",
+      "PRETTY_NAME": "Ubuntu 24.04.2 LTS",
+      "VERSION_ID": "24.04",
+      "VERSION": "24.04.2 LTS (Noble Numbat)",
+      "VERSION_CODENAME": "noble",
+      "ID_LIKE": "debian",
+      "HOME_URL": "https://www.ubuntu.com/",
+      "SUPPORT_URL": "https://help.ubuntu.com/",
+      "BUG_REPORT_URL": "https://bugs.launchpad.net/ubuntu/",
+      "PRIVACY_POLICY_URL": "https://www.ubuntu.com/legal/terms-and-policies/privacy-policy",
+      "UBUNTU_CODENAME": "noble",
+      "LOGO": "ubuntu-logo"
+    },
+    "logical_cpus": 16,
+    "code_commit": "72ad30cec1b9fa32afa99460174706d2b4b1834e"
+  },
+  "evaluation_role": "live",
+  "data_sha256": "2d381c94874a02f222de243891a68d342854169c4253d28184345831812bf6fd",
+  "test_data_sha256": "acfe75b6ace16bc8b9ae1ae54158d961c0fa469c32ae50db42e7414c0ff262a6",
+  "training_workloads": [
+    "random",
+    "repetitive"
+  ],
+  "test_workloads": [
+    "local_mixed"
+  ],
+  "budget_us": 1000,
+  "tree_settings": {
+    "max_depth": 5,
+    "min_samples_leaf": 2
+  },
+  "budget_scope": "Features through fsync",
+  "metrics": {
+    "none_q25": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 8671.19225,
+      "p95_write_latency_us": 33594.374,
+      "mean_decision_latency_us": 8969.231125,
+      "p95_decision_latency_us": 34003.808,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 0.0,
+      "decision_throughput_mib_s": 111.49227688120256,
+      "raw_directory": "artifacts/local_live_01/none_q25"
+    },
+    "lz4_q25": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.494873046875,
+      "mean_write_latency_us": 16235.1454375,
+      "p95_write_latency_us": 71997.852,
+      "mean_decision_latency_us": 16543.7808125,
+      "p95_decision_latency_us": 72290.582,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 0.0,
+      "decision_throughput_mib_s": 60.4456751049572,
+      "raw_directory": "artifacts/local_live_01/lz4_q25"
+    },
+    "zstd_q25": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.49744200706481934,
+      "mean_write_latency_us": 11785.9079375,
+      "p95_write_latency_us": 66643.937,
+      "mean_decision_latency_us": 12103.660062500001,
+      "p95_decision_latency_us": 66910.176,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 0.0,
+      "decision_throughput_mib_s": 82.61963693926239,
+      "raw_directory": "artifacts/local_live_01/zstd_q25"
+    },
+    "ml_q25": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 6962.8036250000005,
+      "p95_write_latency_us": 28832.719,
+      "mean_decision_latency_us": 7316.1950625,
+      "p95_decision_latency_us": 29191.142,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 19.521625,
+      "decision_throughput_mib_s": 136.68306974558607,
+      "raw_directory": "artifacts/local_live_01/ml_q25"
+    },
+    "none_q50": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 5740.532875,
+      "p95_write_latency_us": 14430.991,
+      "mean_decision_latency_us": 6018.1404375,
+      "p95_decision_latency_us": 14752.985,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 0.0,
+      "decision_throughput_mib_s": 166.16428453029098,
+      "raw_directory": "artifacts/local_live_01/none_q50"
+    },
+    "lz4_q50": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.494873046875,
+      "mean_write_latency_us": 5053.7644375,
+      "p95_write_latency_us": 18453.474,
+      "mean_decision_latency_us": 5376.087875,
+      "p95_decision_latency_us": 18933.926,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 0.0,
+      "decision_throughput_mib_s": 186.00886429893038,
+      "raw_directory": "artifacts/local_live_01/lz4_q50"
+    },
+    "zstd_q50": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.49744200706481934,
+      "mean_write_latency_us": 9962.322625,
+      "p95_write_latency_us": 58302.878,
+      "mean_decision_latency_us": 13960.146625,
+      "p95_decision_latency_us": 64747.664,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 0.0,
+      "decision_throughput_mib_s": 71.63248545034534,
+      "raw_directory": "artifacts/local_live_01/zstd_q50"
+    },
+    "ml_q50": {
+      "decisions": 16,
+      "storage_savings_fraction": 0.0,
+      "mean_write_latency_us": 6591.852875,
+      "p95_write_latency_us": 32021.438,
+      "mean_decision_latency_us": 6938.3948125,
+      "p95_decision_latency_us": 32390.399,
+      "budget_miss_fraction": 1.0,
+      "mean_prediction_us": 19.5401875,
+      "decision_throughput_mib_s": 144.12555454446473,
+      "raw_directory": "artifacts/local_live_01/ml_q50"
+    }
+  },
+  "notes": "Local check; sequential runs; timing differences are not evidence of ML speedup."
+}

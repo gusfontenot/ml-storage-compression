@@ -39,7 +39,7 @@ Inference: Python standard library only.
 
 ## Benchmark
 
-Linux VM. Replace the input path. Use a new output directory per run.
+Linux with systemd. Replace the input path. Use a new output directory per run.
 
 ```bash
 systemd-run --user --wait --pipe --collect \
@@ -69,6 +69,7 @@ systemd-run --user --wait --pipe --collect \
 - Storage savings: 0%. Write-budget misses: 25% (offline replay).
 - Improvement over no compression: none in this test.
 - Local tests: codec routing and readback with simulated cgroup readings.
-- Pending: live VM comparisons under CPU limits; C++ storage integration.
+- Local live check: passed at both quotas; see [Experiments](../experiments/README.md).
+- Pending: final evaluation; C++ storage integration.
 
 Pilot coverage: three generated workloads, one chunk size, one period. Replay excludes live selector costs. Predicted budgets are not guarantees.

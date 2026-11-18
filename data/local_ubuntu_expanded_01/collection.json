@@ -1,0 +1,39 @@
+{
+  "status": "complete",
+  "seed": 42,
+  "rounds": 5,
+  "workloads": {
+    "repetitive": 0,
+    "mix_512": 512,
+    "mix_1024": 1024,
+    "mix_1536": 1536,
+    "mixed": 2048,
+    "mix_2560": 2560,
+    "mix_3072": 3072,
+    "mix_3584": 3584,
+    "random": 4096
+  },
+  "quotas": [
+    25,
+    50
+  ],
+  "period_us": 100000,
+  "chunk_bytes": 1048576,
+  "chunks": 8,
+  "validation_workload": "mix_3072",
+  "test_workload": "mix_1536",
+  "benchmark_sha256": "0142ff7ae0613be3997b2e2a2fe0a010272c88f5d8fdfefe2e521e9365ad3b97",
+  "collector_sha256": "33229b01edde9664f7a05156cec50d5dfa7034ba933cf2c34183dc2ca3a024b4",
+  "input_sha256": {
+    "repetitive": "feae15bbe64968c2af8cb6d88018b9543b4273ccb8a90cc15752f7d13567c083",
+    "mix_512": "57e51fa6891b7e2a0016128fbfb8117e53a4fa94d16fbc298c5d545dee24d294",
+    "mix_1024": "1e396ae85bbff97bd614827e8ddc211ec247c5de7076d1e9a9c1354ca81ba242",
+    "mix_1536": "bc1cca1a105b7573f3a5e6f5d9fcb53345127c8b1a577586925b9d872108b91b",
+    "mixed": "67433853fbf9ddccedef4f66172fd92be525098716437972123d463eba499914",
+    "mix_2560": "2cdcf0dea90df1006eebd37a4ecaee3c686e8233b8baea8abda131fb384edd95",
+    "mix_3072": "22b004f5b122640ade55af5e10ae872535a618cb0b8b058d63455e90bd84dd7b",
+    "mix_3584": "27c5850da4017964524590cb629c4f6f4feb5f94189b2845e7b724ae31637a59",
+    "random": "321cb36d4d75300785209fc2ffafaabc3f6ca07ef8e699b7aebe21d48d289e24"
+  },
+  "rows": 2160
+}
